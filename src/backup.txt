@@ -1,0 +1,213 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <Adafruit_Fingerprint.h>
+#include <Adafruit_SSD1306.h>
+#include <ArduinoJson.h>
+#include <Fonts/FreeSans9pt7b.h>
+#include <PubSubClient.h>
+
+// WiFi & MQTT Config
+const char* ssid = "BenS9";
+const char* password = "fqkj4876";
+const char* mqtt_server = "31.97.106.30";
+const int mqtt_port = 1883;
+const char* mqtt_user = "guest";
+const char* mqtt_pass = "guest";
+const char* ENROLL_TOPIC = "fingerprint/enroll";
+const char* DELETE_TOPIC = "fingerprint/delete";
+
+// Display & Fingerprint
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define RX_PIN 16
+#define TX_PIN 17
+HardwareSerial mySerial(2);
+Adafruit_Fingerprint finger(&mySerial);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// MQTT Client
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+// HTTP
+const String SERVER_BASE_URL = "http://31.97.106.30:8080/drivers/";
+
+void connectToWiFi();
+void connectToMQTT();
+void callback(char* topic, byte* payload, unsigned int length);
+void showMessage(String line1, String line2 = "", String line3 = "", String line4 = "", int holdTime = 3000);
+int getFingerprintID();
+void postFingerprintID(int fid);
+uint8_t enrollFingerprint(uint8_t id);
+uint8_t deleteFingerprint(uint8_t id);
+
+void setup() {
+  Serial.begin(115200);
+  mySerial.begin(57600, SERIAL_8N1, RX_PIN, TX_PIN);
+  finger.begin(57600);
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  showMessage("Booting...", "Connecting WiFi");
+
+  connectToWiFi();
+  client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(callback);
+  client.setBufferSize(512);
+  connectToMQTT();
+
+  if (finger.verifyPassword())
+    showMessage("Fingerprint ready");
+  else
+    showMessage("Fingerprint ERROR");
+}
+
+void loop() {
+  if (!client.connected()) {
+    Serial.println("MQTT disconnected, reconnecting...");
+    connectToMQTT();
+  }
+  client.loop();
+  int fid = getFingerprintID();
+  if (fid != -1) postFingerprintID(fid);
+  delay(1000);
+}
+
+void connectToWiFi() {
+  WiFi.begin(ssid, password);
+  int tries = 0;
+  while (WiFi.status() != WL_CONNECTED && tries++ < 20) delay(500);
+  if (WiFi.status() != WL_CONNECTED) showMessage("WiFi Failed");
+}
+
+void connectToMQTT() {
+  while (!client.connected()) {
+    if (client.connect("ESP32Client", mqtt_user, mqtt_pass)) {
+      client.subscribe(ENROLL_TOPIC);
+      client.subscribe(DELETE_TOPIC);
+    } else {
+      delay(2000);
+    }
+  }
+}
+
+void callback(char* topic, byte* payload, unsigned int length) {
+  String message;
+  for (int i = 0; i < length; i++) message += (char)payload[i];
+
+  StaticJsonDocument<128> doc;
+  DeserializationError error = deserializeJson(doc, message);
+  if (error) return;
+
+  String command = doc["command"];
+  uint8_t id = doc["id"];
+
+  if (String(topic) == ENROLL_TOPIC && command == "enroll") {
+    showMessage("Enroll Mode", "ID: " + String(id));
+    uint8_t result = enrollFingerprint(id);
+    String statusText = (result == FINGERPRINT_OK) ? "Enroll Success" : "Enroll Failed";
+    showMessage(statusText, "ID: " + String(id));
+
+    StaticJsonDocument<128> res;
+    res["id"] = id;
+    if (result == FINGERPRINT_OK) {
+      res["status"] = "success";
+    } else {
+      res["status"] = "failed";
+      res["reason"] = "error";
+    }
+    HTTPClient http;
+    http.begin("http://31.97.106.30:8080/enroll/status");
+    http.addHeader("Content-Type", "application/json");
+    String requestBody;
+    serializeJson(res, requestBody);
+    int httpCode = http.POST(requestBody);
+    Serial.println(httpCode > 0 ? "Enroll response sent via HTTP" : "HTTP POST failed");
+    http.end();
+    showMessage("Ready", "", "", "", 2000);
+  }
+  else if (String(topic) == DELETE_TOPIC && command == "delete") {
+    showMessage("Delete Mode", "ID: " + String(id));
+    uint8_t result = deleteFingerprint(id);
+    String statusText = (result == FINGERPRINT_OK) ? "Delete Success" : "Delete Failed";
+    showMessage(statusText, "ID: " + String(id));
+
+    StaticJsonDocument<128> res;
+    res["id"] = id;
+    if (result == FINGERPRINT_OK) {
+      res["status"] = "success";
+    } else {
+      res["status"] = "failed";
+      res["reason"] = "error";
+    }
+    HTTPClient http;
+    http.begin("http://31.97.106.30:8080/delete/status");
+    http.addHeader("Content-Type", "application/json");
+    String requestBody;
+    serializeJson(res, requestBody);
+    int httpCode = http.POST(requestBody);
+    Serial.println(httpCode > 0 ? "Delete response sent via HTTP" : "HTTP POST failed");
+    http.end();
+  }
+}
+
+int getFingerprintID() {
+  if (finger.getImage() != FINGERPRINT_OK) return -1;
+  if (finger.image2Tz() != FINGERPRINT_OK) return -1;
+  if (finger.fingerSearch() != FINGERPRINT_OK) return -1;
+  return finger.fingerID;
+}
+
+void postFingerprintID(int fid) {
+  HTTPClient http;
+  http.begin(SERVER_BASE_URL + String(fid));
+  int httpCode = http.POST("");
+  if (httpCode > 0) {
+    StaticJsonDocument<256> doc;
+    deserializeJson(doc, http.getString());
+    showMessage(doc["driver_name"] | "Unknown", doc["old_status"] | "?", "->", doc["new_status"] | "?");
+  } else {
+    showMessage("POST Failed", String(httpCode));
+  }
+  http.end();
+  showMessage("Ready", "", "", "", 2000);
+}
+
+uint8_t enrollFingerprint(uint8_t id) {
+  int p;
+  showMessage("Place finger");
+  while ((p = finger.getImage()) != FINGERPRINT_OK);
+  finger.image2Tz(1);
+  showMessage("Remove finger");
+  delay(1000);
+  while ((p = finger.getImage()) != FINGERPRINT_NOFINGER);
+  showMessage("Place again");
+  while ((p = finger.getImage()) != FINGERPRINT_OK);
+  finger.image2Tz(2);
+  p = finger.createModel();
+  if (p != FINGERPRINT_OK) return p;
+  return finger.storeModel(id);
+}
+
+uint8_t deleteFingerprint(uint8_t id) {
+  return finger.deleteModel(id);
+}
+
+void showMessage(String line1, String line2, String line3, String line4, int holdTime) {
+  display.clearDisplay();
+  display.setFont(&FreeSans9pt7b);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  int y = 16;
+
+  for (String line : {line1, line2, line3, line4}) {
+    if (line != "") {
+      display.setCursor(0, y);
+      display.println(line);
+      y += 16;
+    }
+  }
+
+  display.display();
+  delay(1000);
+  display.clearDisplay();
+}
