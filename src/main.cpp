@@ -6,9 +6,13 @@
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_Fingerprint.h>
 #include <ArduinoJson.h>
+#define FP_LOG(...) \
+  do                \
+  {                 \
+  } while (0)
 void showMessage(String line1, String line2, String line3, String line4, int delayTime);
 
-#define FP_DEBUG 1
+#define FP_DEBUG 0
 #ifndef FP_OLED_MS
 #define FP_OLED_MS 800
 #endif
@@ -44,25 +48,6 @@ const char *fpCodeToStr(uint8_t c)
   default:
     return "UNKNOWN";
   }
-}
-
-void FP_LOG(const char *where, uint8_t code)
-{
-#if FP_DEBUG
-  Serial.print("[FP] ");
-  Serial.print(where);
-  Serial.print(" -> code=");
-  Serial.print(code);
-  Serial.print(" (0x");
-  Serial.print(code, HEX);
-  Serial.print(") ");
-  Serial.println(fpCodeToStr(code));
-
-  // tampilkan singkat di OLED via showMessage (tanpa akses 'display' langsung)
-  String line1 = String(where);
-  String line2 = "FP: " + String(code) + " 0x" + String(code, HEX) + " " + fpCodeToStr(code);
-  showMessage(line1, line2, "", "", FP_OLED_MS);
-#endif
 }
 
 #define RX_PIN 16
@@ -288,7 +273,6 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
   }
   else if (String(topic) == RESET_TOPIC && command == "reset")
   {
-    showMessage("Reset WiFi via MQTT");
     delay(2000);         // beri jeda untuk user lihat
     resetWiFiSettings(); // Panggil fungsi reset WiFi
   }
@@ -305,14 +289,13 @@ void connectToWiFi()
 
   if (!res)
   {
-    Serial.println("Gagal konek WiFi");
-    showMessage("WiFi gagal", "Hubungkan lagi");
+
     delay(3000);
     ESP.restart(); // Atau bisa masuk deep sleep dll
   }
   else
   {
-    Serial.println("WiFi terhubung!");
+
     showMessage("WiFi terhubung");
     delay(3000);
     showMessage("Fingerprint Ready");
@@ -325,28 +308,21 @@ void ensureWiFiConnected()
 {
   if (WiFi.status() != WL_CONNECTED)
   {
-    showMessage("WiFi terputus", "Menyambung ulang...");
-    buzzFailure();
     delay(1000);
     WiFi.begin();
 
     unsigned long tStart = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - tStart < 10000)
     {
-      showMessage("WiFi terputus", "Menyambung ulang...");
       delay(500);
     }
 
     if (WiFi.status() != WL_CONNECTED)
     {
       wifiRetryCount++;
-      showMessage("WiFi gagal", "Percobaan: " + String(wifiRetryCount));
-      buzzFailure();
       delay(3000);
       if (wifiRetryCount >= 3)
       {
-        showMessage("Reset WiFi", "Masuk mode AP...");
-        buzzFailure();
         delay(3000);
         WiFiManager wm;
         wm.resetSettings();
@@ -426,6 +402,8 @@ void fingerprintTask(void *parameter)
     FP_LOG("scan:getImage", p);
     if (p == FINGERPRINT_OK)
     {
+      showMessage("Scanning");
+
       p = finger.image2Tz();
       FP_LOG("scan:image2Tz", p);
       if (p != FINGERPRINT_OK)
@@ -434,10 +412,7 @@ void fingerprintTask(void *parameter)
       FP_LOG("scan:fingerSearch", p);
       if (p == FINGERPRINT_OK)
       {
-        Serial.print("[FP] MATCH id=");
-        Serial.print(finger.fingerID);
-        Serial.print(" confidence=");
-        Serial.println(finger.confidence);
+
         StaticJsonDocument<64> doc;
         doc["id"] = finger.fingerID;
         String body;
@@ -482,7 +457,6 @@ void fingerprintTask(void *parameter)
           else
           {
             retryHttp++;
-            showMessage("HTTP Error", "Retry: " + String(retryHttp));
             http.end();
             delay(1000); // jeda sebelum mencoba ulang
           }
@@ -490,7 +464,6 @@ void fingerprintTask(void *parameter)
 
         if (!success)
         {
-          showMessage("Gagal kirim data");
           buzzFailure();
         }
       }
@@ -515,8 +488,6 @@ void setup()
   showMessage("Hubungkan ke WiFi...");
 
   // Serial debug utama
-  Serial.begin(115200);
-  Serial.println("\n[FP] Booting...");
 
   // UART ke sensor fingerprint
   mySerial.begin(57600, SERIAL_8N1, RX_PIN, TX_PIN);
@@ -525,11 +496,10 @@ void setup()
   // Verifikasi sensor
   if (finger.verifyPassword())
   {
-    Serial.println("[FP] verifyPassword OK");
   }
   else
   {
-    Serial.println("[FP] verifyPassword FAILED");
+
     showMessage("Sensor FP error", "verifyPassword() fail");
     while (1)
       vTaskDelay(1000 / portTICK_PERIOD_MS);
@@ -539,33 +509,13 @@ void setup()
   uint8_t gp = finger.getParameters();
   if (gp == FINGERPRINT_OK)
   {
-    Serial.print("[FP] status reg: ");
-    Serial.println(finger.status_reg);
-    Serial.print("[FP] system id : ");
-    Serial.println(finger.system_id);
-    Serial.print("[FP] capacity  : ");
-    Serial.println(finger.capacity);
-    Serial.print("[FP] sec level : ");
-    Serial.println(finger.security_level);
-    Serial.print("[FP] addr      : ");
-    Serial.println(finger.device_addr);
-    Serial.print("[FP] packet len: ");
-    Serial.println(finger.packet_len);
-    Serial.print("[FP] baud rate : ");
-    Serial.println(finger.baud_rate);
+
     if (finger.getTemplateCount() == FINGERPRINT_OK)
     {
-      Serial.print("[FP] template count: ");
-      Serial.println(finger.templateCount);
     }
   }
   else
   {
-    Serial.print("[FP] getParameters FAIL code=");
-    Serial.print(gp);
-    Serial.print(" (0x");
-    Serial.print(gp, HEX);
-    Serial.println(")");
   }
 
   // Jalankan tasks
